@@ -278,13 +278,10 @@ async def run_broadcaster(server_url="wss://localhost:8000/ws", resolution="1080
                     pass
                 except websockets.exceptions.ConnectionClosed:
                     logger.warning("WebSocket connection closed")
-                    break
                 except KeyboardInterrupt:
                     logger.info("Stopped by user")
-                    break
                 except Exception as e:
                     logger.error(f"Error in message loop: {e}", exc_info=True)
-                    break
                 finally:
                     # Clean up
                     if active_broadcast:
