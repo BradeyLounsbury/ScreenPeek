@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Stream Viewer</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f2f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h1 {
+            margin: 0;
+            color: #2c3e50;
+            font-size: 2rem;
+        }
+        .video-container {
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            margin-bottom: 20px;
+        }
+        video {
+            width: 100%;
+            display: block;
+        }
+        .fullscreen-btn {
+            position: absolute;
+            right: 15px;
+            bottom: 15px;
+            background-color: rgba(0,0,0,0.5);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px;
+            cursor: pointer;
+            opacity: 0.7;
+            transition: opacity 0.3s;
+        }
+        .fullscreen-btn:hover {
+            opacity: 1;
+        }
+        .status-bar {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .disconnected .status-indicator {
+            background-color: #e74c3c;
+        }
+        .connecting .status-indicator {
+            background-color: #f39c12;
+            animation: pulse 1.5s infinite;
+        }
+        .connected .status-indicator {
+            background-color: #2ecc71;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+        .controls {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 10px 20px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: 500;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
+        button.stop {
+            background-color: #e74c3c;
+        }
+        button.stop:hover {
+            background-color: #c0392b;
+        }
+        .settings {
+            margin-top: 15px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .setting-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            background-color: #f9f9f9;
+        }
+        .stats-panel {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .stats-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .stats-content {
+            font-family: monospace;
+            white-space: pre-wrap;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            height: 150px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .collapse-btn {
+            background: none;
+            border: none;
+            color: #7f8c8d;
+            cursor: pointer;
+            padding: 0;
+            font-size: 14px;
+        }
+        .hidden {
+            display: none;
+        }
+        .buffer-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            display: none;
+        }
+        .buffer-indicator.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Screen Stream Viewer</h1>
+        </header>
+        
+        <div class="status-bar disconnected" id="statusBar">
+            <div>
+                <span class="status-indicator"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+            <div id="connectionInfo"></div>
+        </div>
+        
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <button class="fullscreen-btn" id="fullscreenBtn">⛶</button>
+            <div class="buffer-indicator" id="bufferIndicator">Buffering...</div>
+        </div>
+        
+        <div class="controls">
+            <div class="button-group">
+                <button id="startBtn">Connect to Stream</button>
+                <button id="stopBtn" class="stop" disabled>Disconnect</button>
+            </div>
+            
+            <div class="settings">
+                <div class="setting-group">
+                    <label for="qualitySelect">Quality:</label>
+                    <select id="qualitySelect">
+                        <option value="auto">Auto (Adaptive)</option>
+                        <option value="high" selected>High (1080p)</option>
+                        <option value="medium">Medium (720p)</option>
+                        <option value="low">Low (480p)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        
+        <div class="stats-panel">
+            <div class="stats-title">
+                <h3>Connection Statistics</h3>
+                <button class="collapse-btn" id="collapseStats">Hide</button>
+            </div>
+            <div class="stats-content" id="statsContent">Waiting for connection...</div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Elements
+            const video = document.getElementById('video');
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            const statusBar = document.getElementById('statusBar');
+            const statusText = document.getElementById('statusText');
+            const connectionInfo = document.getElementById('connectionInfo');
+            const qualitySelect = document.getElementById('qualitySelect');
+            const statsContent = document.getElementById('statsContent');
+            const collapseStats = document.getElementById('collapseStats');
+            const fullscreenBtn = document.getElementById('fullscreenBtn');
+            const bufferIndicator = document.getElementById('bufferIndicator');
+            
+            // WebRTC variables
+            let pc = null;
+            let ws = null;
+            let statsInterval = null;
+            let reconnectTimer = null;
+            let currentQuality = qualitySelect.value;
+            
+            // Toggle stats visibility
+            collapseStats.addEventListener('click', () => {
+                if (statsContent.classList.contains('hidden')) {
+                    statsContent.classList.remove('hidden');
+                    collapseStats.textContent = 'Hide';
+                } else {
+                    statsContent.classList.add('hidden');
+                    collapseStats.textContent = 'Show';
+                }
+            });
+            
+            // Fullscreen button
+            fullscreenBtn.addEventListener('click', () => {
+                if (video.requestFullscreen) {
+                    video.requestFullscreen();
+                } else if (video.webkitRequestFullscreen) {
+                    video.webkitRequestFullscreen();
+                } else if (video.msRequestFullscreen) {
+                    video.msRequestFullscreen();
+                }
+            });
+            
+            // Handle buffering indicator
+            video.addEventListener('waiting', () => {
+                bufferIndicator.classList.add('active');
+            });
+            
+            video.addEventListener('playing', () => {
+                bufferIndicator.classList.remove('active');
+            });
+            
+            // Function to update connection status
+            function updateStatus(state, message, details = '') {
+                statusBar.className = `status-bar ${state}`;
+                statusText.textContent = message;
+                connectionInfo.textContent = details;
+                console.log(`Status: ${message} ${details}`);
+            }
+            
+            // Function to create peer connection with appropriate ICE servers
+            function createPeerConnection() {
+                console.log("Creating peer connection...");
+                
+                const config = {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                };
+                
+                pc = new RTCPeerConnection(config);
+                console.log("Peer connection created");
+                
+                // Set up ICE candidate handling
+                pc.onicecandidate = (event) => {
+                    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                        console.log("Sending ICE candidate to server");
+                        ws.send(JSON.stringify({
+                            type: 'ice',
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex
+                        }));
+                    }
+                };
+                
+                // Set up connection state change handling
+                pc.onconnectionstatechange = () => {
+                    console.log('Connection state:', pc.connectionState);
+                    if (pc.connectionState === 'connected') {
+                        updateStatus('connected', 'Connected to stream');
+                    } else if (pc.connectionState === 'disconnected') {
+                        updateStatus('connecting', 'Connection interrupted, attempting to reconnect...');
+                        // Could implement reconnection logic here
+                    } else if (pc.connectionState === 'failed') {
+                        updateStatus('disconnected', 'Connection failed');
+                        stopConnection();
+                    }
+                };
+                
+                // Set up ICE connection state change handling
+                pc.oniceconnectionstatechange = () => {
+                    console.log('ICE connection state:', pc.iceConnectionState);
+                };
+                
+                // Set up track handling for incoming video
+                pc.ontrack = (event) => {
+                    console.log("Track received:", event.track.kind);
+                    if (event.track.kind === 'video') {
+                        console.log("Setting video source");
+                        video.srcObject = event.streams[0];
+                        
+                        // Start collecting statistics
+                        if (statsInterval) {
+                            clearInterval(statsInterval);
+                        }
+                        
+                        statsInterval = setInterval(async () => {
+                            try {
+                                const stats = await pc.getStats();
+                                let statsOutput = '';
+                                let bitrate = 0;
+                                let packetsLost = 0;
+                                let framesDecoded = 0;
+                                let framesDropped = 0;
+                                
+                                stats.forEach(report => {
+                                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                                        const now = new Date(report.timestamp);
+                                        
+                                        // Calculate bitrate when we have two consecutive stats
+                                        if (report.bytesReceived && this.lastBytesReceived) {
+                                            const bytesReceived = report.bytesReceived - this.lastBytesReceived;
+                                            const timeDiff = (report.timestamp - this.lastTimestamp) / 1000; // in seconds
+                                            bitrate = Math.floor((bytesReceived * 8) / timeDiff / 1000); // kbps
+                                        }
+                                        
+                                        this.lastBytesReceived = report.bytesReceived;
+                                        this.lastTimestamp = report.timestamp;
+                                        
+                                        packetsLost = report.packetsLost || 0;
+                                        framesDecoded = report.framesDecoded || 0;
+                                        framesDropped = report.framesDropped || 0;
+                                        
+                                        statsOutput += `Time: ${now.toLocaleTimeString()}\n`;
+                                        statsOutput += `Resolution: ${report.frameWidth}x${report.frameHeight}\n`;
+                                        statsOutput += `Framerate: ${Math.round(report.framesPerSecond || 0)} FPS\n`;
+                                        statsOutput += `Bitrate: ${bitrate} kbps\n`;
+                                        statsOutput += `Packets Lost: ${packetsLost} (${(packetsLost / (report.packetsReceived + packetsLost) * 100).toFixed(2)}%)\n`;
+                                        statsOutput += `Jitter: ${report.jitter ? (report.jitter * 1000).toFixed(2) : 0} ms\n`;
+                                        
+                                        if (framesDecoded > 0) {
+                                            statsOutput += `Frames: ${framesDecoded} decoded, ${framesDropped} dropped (${(framesDropped / framesDecoded * 100).toFixed(2)}%)\n`;
+                                        }
+                                        
+                                        // Update connection info in status bar
+                                        connectionInfo.textContent = `${report.frameWidth}x${report.frameHeight} @ ${Math.round(report.framesPerSecond || 0)} FPS`;
+                                    }
+                                });
+                                
+                                statsContent.textContent = statsOutput || 'Collecting statistics...';
+                            } catch (e) {
+                                console.error('Error getting stats:', e);
+                            }
+                        }, 1000);
+                    }
+                };
+                
+                return pc;
+            }
+            
+            // Function to connect to WebSocket and start streaming
+            async function startConnection() {
+                try {
+                    updateStatus('connecting', 'Connecting to server...');
+                    
+                    // Connect to WebSocket server
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/ws`;
+                    console.log(`Connecting to WebSocket: ${wsUrl}`);
+                    ws = new WebSocket(wsUrl);
+                    
+                    ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        
+                        // Register as viewer
+                        console.log("Registering as viewer");
+                        ws.send(JSON.stringify({
+                            type: 'register',
+                            role: 'viewer'
+                        }));
+                        
+                        // Join the stream
+                        console.log("Joining stream");
+                        ws.send(JSON.stringify({
+                            type: 'join'
+                        }));
+                    };
+                    
+                    ws.onmessage = async (event) => {
+                        console.log(`WebSocket message received: ${event.data.substring(0, 50)}...`);
+                        const message = JSON.parse(event.data);
+                        
+                        if (message.type === 'registered') {
+                            console.log('Registered as viewer with ID:', message.id);
+                        } else if (message.type === 'offer') {
+                            console.log('Received offer from server');
+                            
+                            // Create peer connection if it doesn't exist
+                            if (!pc) {
+                                pc = createPeerConnection();
+                            }
+                            
+                            // Set remote description from offer
+                            console.log("Setting remote description");
+                            await pc.setRemoteDescription(new RTCSessionDescription({
+                                sdp: message.sdp,
+                                type: message.sdp_type
+                            }));
+                            
+                            // Create answer
+                            console.log("Creating answer");
+                            const answer = await pc.createAnswer();
+                            
+                            // Apply quality constraints based on selection
+                            const quality = qualitySelect.value;
+                            let sdp = answer.sdp;
+                            
+                            if (quality !== 'auto') {
+                                // Modify SDP to apply quality constraints
+                                if (quality === 'high') {
+                                    // 1080p maximum
+                                    sdp = sdp.replace(/a=mid:0\r\n/g, 'a=mid:0\r\na=maxresolution:1920x1080\r\n');
+                                } else if (quality === 'medium') {
+                                    // 720p maximum
+                                    sdp = sdp.replace(/a=mid:0\r\n/g, 'a=mid:0\r\na=maxresolution:1280x720\r\n');
+                                } else if (quality === 'low') {
+                                    // 480p maximum
+                                    sdp = sdp.replace(/a=mid:0\r\n/g, 'a=mid:0\r\na=maxresolution:854x480\r\n');
+                                }
+                            }
+                            
+                            // Set local description with potentially modified SDP
+                            console.log("Setting local description");
+                            await pc.setLocalDescription(new RTCSessionDescription({
+                                sdp: sdp,
+                                type: answer.type
+                            }));
+                            
+                            // Send answer to server
+                            console.log("Sending answer to server");
+                            ws.send(JSON.stringify({
+                                type: 'answer',
+                                sdp: pc.localDescription.sdp,
+                                sdp_type: pc.localDescription.type
+                            }));
+                            
+                            updateStatus('connecting', 'Connecting to stream...');
+                        } else if (message.type === 'ice') {
+                            // Add ICE candidate if peer connection exists
+                            if (pc) {
+                                console.log("Adding ICE candidate");
+                                try {
+                                    await pc.addIceCandidate({
+                                        candidate: message.candidate,
+                                        sdpMid: message.sdpMid,
+                                        sdpMLineIndex: message.sdpMLineIndex
+                                    });
+                                } catch (e) {
+                                    console.error("Error adding ICE candidate:", e);
+                                }
+                            }
+                        } else if (message.type === 'error') {
+                            console.error("Error from server:", message.message);
+                            updateStatus('disconnected', `Error: ${message.message}`);
+                            stopConnection();
+                        }
+                    };
+                    
+                    ws.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        updateStatus('disconnected', 'Disconnected from server');
+                        stopConnection();
+                    };
+                    
+                    ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        updateStatus('disconnected', 'Connection error');
+                        stopConnection();
+                    };
+                    
+                    // Update button states
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                    
+                } catch (error) {
+                    console.error('Error starting connection:', error);
+                    updateStatus('disconnected', `Connection error: ${error.message}`);
+                    stopConnection();
+                }
+            }
+            
+            // Function to stop streaming and clean up
+            function stopConnection() {
+                console.log("Stopping connection");
+                
+                // Clear stats interval
+                if (statsInterval) {
+                    clearInterval(statsInterval);
+                    statsInterval = null;
+                }
+                
+                // Clear reconnect timer
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                
+                // Close peer connection
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+                
+                // Close WebSocket
+                if (ws) {
+                    ws.close();
+                    ws = null;
+                }
+                
+                // Stop video
+                if (video.srcObject) {
+                    video.srcObject.getTracks().forEach(track => track.stop());
+                    video.srcObject = null;
+                }
+                
+                // Update button states
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                // Reset stats
+                statsContent.textContent = 'Connection closed';
+                connectionInfo.textContent = '';
+            }
+            
+            // Set up event listeners
+            startBtn.addEventListener('click', startConnection);
+            stopBtn.addEventListener('click', stopConnection);
+            
+            // Update quality on change
+            qualitySelect.addEventListener('change', () => {
+                const newQuality = qualitySelect.value;
+                if (newQuality !== currentQuality && pc && pc.connectionState === 'connected') {
+                    // Reconnect to apply new quality settings
+                    currentQuality = newQuality;
+                    console.log(`Changing quality to ${newQuality}`);
+                    stopConnection();
+                    setTimeout(startConnection, 500);
+                } else {
+                    currentQuality = newQuality;
+                }
+            });
+        });
+    </script>
+</body>
+</html>

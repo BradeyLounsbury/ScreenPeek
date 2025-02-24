@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Broadcast Screen</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin: 20px 0;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        .button {
+            display: inline-block;
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            text-align: center;
+            text-decoration: none;
+            font-size: 16px;
+            border-radius: 4px;
+            margin: 10px;
+            cursor: pointer;
+            border: none;
+        }
+        .button:hover {
+            background-color: #45a049;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .connected {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .disconnected {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .connecting {
+            background-color: #fcf8e3;
+            color: #8a6d3b;
+        }
+        .monitor-selector {
+            margin: 20px 0;
+        }
+        select {
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-size: 14px;
+        }
+        .info {
+            text-align: left;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Broadcast Your Screen</h1>
+        
+        <div class="card">
+            <div class="status disconnected" id="status">
+                Not broadcasting
+            </div>
+            
+            <div class="monitor-selector">
+                <label for="monitor">Select monitor:</label>
+                <select id="monitor">
+                    <option value="1" selected>Primary Display</option>
+                    <!-- Additional monitors will be added by JavaScript -->
+                </select>
+            </div>
+            
+            <button id="startBroadcast" class="button">Start Broadcasting</button>
+            <button id="stopBroadcast" class="button" disabled>Stop Broadcasting</button>
+            
+            <div class="info">
+                <p>Note: You need to run the <code>broadcaster.py</code> script to stream your screen.</p>
+                <p>Current viewers: <span id="viewerCount">0</span></p>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Share this link with viewers:</h2>
+            <input type="text" id="shareLink" readonly style="width: 80%; padding: 10px; margin: 10px 0;">
+            <button id="copyLink" class="button">Copy Link</button>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusDiv = document.getElementById('status');
+            const startButton = document.getElementById('startBroadcast');
+            const stopButton = document.getElementById('stopBroadcast');
+            const shareLinkInput = document.getElementById('shareLink');
+            const copyLinkButton = document.getElementById('copyLink');
+            const viewerCountSpan = document.getElementById('viewerCount');
+            
+            // Set share link
+            const protocol = window.location.protocol;
+            const host = window.location.host;
+            shareLinkInput.value = `${protocol}//${host}/view`;
+            
+            // Copy link button
+            copyLinkButton.addEventListener('click', () => {
+                shareLinkInput.select();
+                document.execCommand('copy');
+                alert('Link copied to clipboard!');
+            });
+            
+            // Update status
+            function updateStatus(state, message) {
+                statusDiv.className = `status ${state}`;
+                statusDiv.textContent = message;
+            }
+            
+            // Start button just shows instructions
+            startButton.addEventListener('click', () => {
+                updateStatus('connecting', 'Please run the broadcaster.py script on your computer to start streaming');
+                startButton.disabled = true;
+                stopButton.disabled = false;
+            });
+            
+            // Stop button
+            stopButton.addEventListener('click', () => {
+                updateStatus('disconnected', 'Broadcasting stopped');
+                startButton.disabled = false;
+                stopButton.disabled = true;
+            });
+        });
+    </script>
+</body>
+</html>
