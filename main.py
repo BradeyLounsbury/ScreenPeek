@@ -35,22 +35,55 @@ relay = MediaRelay()
 # Heartbeat interval
 HEARTBEAT_INTERVAL = 30  # seconds
 
+async def cleanup_stale_connections():
+    """Periodically check and clean up stale connections."""
+    global peer_connections, viewer_ids
+    
+    while True:
+        try:
+            # Check all peer connections
+            for client_id in list(peer_connections.keys()):
+                pc = peer_connections[client_id]
+                if pc.connectionState == "closed" or pc.connectionState == "failed":
+                    logger.info(f"Cleaning up stale connection for client {client_id}")
+                    try:
+                        await pc.close()
+                    except:
+                        pass
+                    
+                    # Remove from peer_connections dict
+                    if client_id in peer_connections:
+                        del peer_connections[client_id]
+                    
+                    # If it was a viewer, remove from viewer_ids
+                    if client_id in viewer_ids:
+                        viewer_ids.discard(client_id)
+                        await notify_broadcaster_viewer_disconnected(client_id)
+        except Exception as e:
+            logger.error(f"Error in cleanup_stale_connections: {e}")
+        
+        # Run this check every 30 seconds
+        await asyncio.sleep(30)
+
 # Define lifespan context manager (modern replacement for on_event)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Start background tasks
     heartbeat_task = asyncio.create_task(broadcaster_heartbeat())
-    logger.info("Server started, heartbeat task created")
+    cleanup_task = asyncio.create_task(cleanup_stale_connections())
+    logger.info("Server started, background tasks created")
     
     yield  # The application runs here
     
     # Shutdown: Cleanup tasks
     heartbeat_task.cancel()
+    cleanup_task.cancel()
     try:
         await heartbeat_task
+        await cleanup_task
     except asyncio.CancelledError:
         pass
-    logger.info("Server shutting down, heartbeat task cancelled")
+    logger.info("Server shutting down, background tasks cancelled")
     
     # Close all peer connections
     for pc in peer_connections.values():
@@ -190,11 +223,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         relayed_track = relay.subscribe(track)
                         broadcaster_tracks.append(relayed_track)
                         
-                        # Add track to existing viewer connections
-                        for viewer_id in viewer_ids:
+                        # Add track to existing viewer connections - check if they're still valid first
+                        for viewer_id in list(viewer_ids):  # Create a copy of the list to avoid modification during iteration
                             if viewer_id in peer_connections:
-                                logger.info(f"Adding track to existing viewer {viewer_id}")
-                                peer_connections[viewer_id].addTrack(relayed_track)
+                                try:
+                                    viewer_pc = peer_connections[viewer_id]
+                                    # Check if the connection is still open
+                                    if viewer_pc.connectionState != "closed":
+                                        logger.info(f"Adding track to existing viewer {viewer_id}")
+                                        viewer_pc.addTrack(relayed_track)
+                                    else:
+                                        logger.warning(f"Viewer connection {viewer_id} was closed, removing from active viewers")
+                                        viewer_ids.discard(viewer_id)
+                                        if viewer_id in peer_connections:
+                                            del peer_connections[viewer_id]
+                                except Exception as e:
+                                    logger.error(f"Error adding track to viewer {viewer_id}: {e}")
+                                    # Clean up this problematic connection
+                                    viewer_ids.discard(viewer_id)
+                                    if viewer_id in peer_connections:
+                                        del peer_connections[viewer_id]
                 
                 # Set the remote description
                 await pc.setRemoteDescription(offer)
@@ -216,6 +264,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         pc = peer_connections[client_id]
                         
+                        # Fix: Create proper RTCIceCandidate object
                         if "candidate" in message:
                             candidate = RTCIceCandidate(
                                 sdpMid=message.get("sdpMid", ""),

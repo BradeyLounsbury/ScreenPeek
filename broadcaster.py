@@ -157,166 +157,186 @@ class ScreenCaptureTrack(VideoStreamTrack):
         
         return video_frame
 
-async def run_broadcaster(server_url="wss://localhost:8000/ws", resolution="1080p", fps=30, monitor=1):
-    # SSL context to ignore certificate verification
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    
-    try:
-        logger.info(f"Connecting to {server_url}")
-        
-        async with websockets.connect(server_url, ssl=ssl_context) as websocket:
-            logger.info("Connected to signaling server")
-            
-            # Create screen capture track with user settings (initially inactive)
-            logger.info(f"Creating screen capture track (Resolution: {resolution}, FPS: {fps}, Monitor: {monitor})")
-            video = ScreenCaptureTrack(resolution=resolution, fps=fps, monitor_num=monitor)
-            
-            # Track viewer count and active state
-            viewer_count = 0
-            active_broadcast = False
-            
-            # Register as broadcaster
-            await websocket.send(json.dumps({
-                "type": "register",
-                "role": "broadcaster"
-            }))
-            
-            registration = await websocket.recv()
-            reg_data = json.loads(registration)
-            logger.info(f"Registered as: {reg_data}")
-            
-            # Create peer connection
-            pc = RTCPeerConnection()
-            
-            # Add the video track (it will initially send black frames at low rate)
-            sender = pc.addTrack(video)
-            
-            # ICE state change handler
-            @pc.on("iceconnectionstatechange")
-            async def on_iceconnectionstatechange():
-                logger.info(f"ICE Connection state: {pc.iceConnectionState}")
-            
-            # ICE candidate handler
-            @pc.on("icecandidate")
-            async def on_icecandidate(candidate):
-                if candidate:
-                    await websocket.send(json.dumps({
-                        "type": "ice",
-                        "candidate": candidate.candidate,
-                        "sdpMid": candidate.sdpMid,
-                        "sdpMLineIndex": candidate.sdpMLineIndex
-                    }))
-            
-            # Create offer
-            logger.info("Creating offer")
-            offer = await pc.createOffer()
-            
-            # Set local description
-            await pc.setLocalDescription(offer)
-            logger.info("Local description set")
-            
-            # Send offer to server
-            await websocket.send(json.dumps({
-                "type": "offer",
-                "sdp": pc.localDescription.sdp,
-                "sdp_type": pc.localDescription.type
-            }))
-            logger.info("Offer sent")
-            
-            # Waiting for initial answer
-            logger.info("Waiting for answer")
-            response = await websocket.recv()
-            answer_data = json.loads(response)
-            
-            if answer_data["type"] == "answer":
-                # Set remote description
-                logger.info("Processing answer")
-                answer = RTCSessionDescription(
-                    sdp=answer_data["sdp"], 
-                    type=answer_data["sdp_type"]
-                )
-                await pc.setRemoteDescription(answer)
-                logger.info("Remote description set")
-                
-                # Now wait for viewer messages
-                logger.info("Waiting for viewers to connect...")
-                
-                # Keep the connection alive
-                try:
-                    while True:
-                        # Wait for messages from the server
-                        message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                        data = json.loads(message)
-                        
-                        if data["type"] == "viewer_connected":
-                            viewer_count += 1
-                            logger.info(f"Viewer connected. Total viewers: {viewer_count}")
-                            
-                            # Start streaming if not already active
-                            if not active_broadcast:
-                                logger.info("Starting active broadcast")
-                                video.start_streaming()
-                                active_broadcast = True
-                                
-                        elif data["type"] == "viewer_disconnected":
-                            viewer_count = max(0, viewer_count - 1)
-                            logger.info(f"Viewer disconnected. Total viewers: {viewer_count}")
-                            
-                            # Stop streaming if no more viewers
-                            if viewer_count == 0 and active_broadcast:
-                                logger.info("No more viewers, pausing broadcast")
-                                video.stop_streaming()
-                                active_broadcast = False
-                                
-                        elif data["type"] == "ice":
-                            # Process ICE candidates from server
-                            await pc.addIceCandidate({
-                                "candidate": data["candidate"],
-                                "sdpMid": data["sdpMid"],
-                                "sdpMLineIndex": data["sdpMLineIndex"]
-                            })
-                            
-                        elif data["type"] == "heartbeat":
-                            # Respond to server heartbeat
-                            await websocket.send(json.dumps({
-                                "type": "heartbeat_ack"
-                            }))
-                            
-                except asyncio.TimeoutError:
-                    # No message received in timeout period, just continue
-                    pass
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("WebSocket connection closed")
-                except KeyboardInterrupt:
-                    logger.info("Stopped by user")
-                except Exception as e:
-                    logger.error(f"Error in message loop: {e}", exc_info=True)
-                finally:
-                    # Clean up
-                    if active_broadcast:
-                        video.stop_streaming()
-                    await pc.close()
-            else:
-                logger.error(f"Unexpected message: {answer_data}")
-                
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-
 async def run_broadcaster_with_reconnection(server_url, resolution, fps, monitor):
     """Run the broadcaster with automatic reconnection if the connection is lost."""
+    # Create a persistent ScreenCaptureTrack that we'll reuse between connections
+    video = ScreenCaptureTrack(resolution=resolution, fps=fps, monitor_num=monitor)
+    
+    # Keep track of whether we're in an active streaming session
+    active_broadcast = False
+    backoff_time = 5  # Initial backoff time in seconds
+    max_backoff = 60  # Maximum backoff time
+    
     while True:
         try:
             logger.info("Attempting to connect to server...")
-            await run_broadcaster(server_url, resolution, fps, monitor)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket connection closed, attempting to reconnect in 5 seconds...")
-            await asyncio.sleep(5)
+            
+            # Create SSL context for secure connections
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            async with websockets.connect(server_url, ssl=ssl_context) as websocket:
+                logger.info("Connected to signaling server")
+                
+                # Reset backoff time on successful connection
+                backoff_time = 5
+                
+                # Initialize connection variables
+                pc = None
+                viewer_count = 0
+                
+                # Register as broadcaster
+                await websocket.send(json.dumps({
+                    "type": "register",
+                    "role": "broadcaster"
+                }))
+                
+                registration = await websocket.recv()
+                reg_data = json.loads(registration)
+                logger.info(f"Registered as: {reg_data}")
+                
+                # Create new peer connection
+                pc = RTCPeerConnection()
+                
+                # Add the video track 
+                sender = pc.addTrack(video)
+                
+                # ICE state change handler
+                @pc.on("iceconnectionstatechange")
+                async def on_iceconnectionstatechange():
+                    logger.info(f"ICE Connection state: {pc.iceConnectionState}")
+                    if pc.iceConnectionState == "connected":
+                        logger.info("ICE Connection established")
+                    elif pc.iceConnectionState in ["disconnected", "failed", "closed"]:
+                        logger.warning(f"ICE Connection state changed to {pc.iceConnectionState}")
+                
+                # ICE candidate handler
+                @pc.on("icecandidate")
+                async def on_icecandidate(candidate):
+                    if candidate:
+                        try:
+                            await websocket.send(json.dumps({
+                                "type": "ice",
+                                "candidate": candidate.candidate,
+                                "sdpMid": candidate.sdpMid,
+                                "sdpMLineIndex": candidate.sdpMLineIndex
+                            }))
+                        except Exception as e:
+                            logger.error(f"Error sending ICE candidate: {e}")
+                
+                # Create offer
+                logger.info("Creating offer")
+                offer = await pc.createOffer()
+                
+                # Set local description
+                await pc.setLocalDescription(offer)
+                logger.info("Local description set")
+                
+                # Send offer to server
+                await websocket.send(json.dumps({
+                    "type": "offer",
+                    "sdp": pc.localDescription.sdp,
+                    "sdp_type": pc.localDescription.type
+                }))
+                logger.info("Offer sent")
+                
+                try:
+                    # Message handling loop
+                    while True:
+                        # Wait for messages with a timeout
+                        try:
+                            message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                            data = json.loads(message)
+                            
+                            if data["type"] == "answer":
+                                # Set remote description
+                                logger.info("Processing answer")
+                                answer = RTCSessionDescription(
+                                    sdp=data["sdp"], 
+                                    type=data["sdp_type"]
+                                )
+                                await pc.setRemoteDescription(answer)
+                                logger.info("Remote description set")
+                                
+                            elif data["type"] == "viewer_connected":
+                                viewer_count += 1
+                                logger.info(f"Viewer connected. Total viewers: {viewer_count}")
+                                
+                                # Start streaming if not already active
+                                if not active_broadcast:
+                                    logger.info("Starting active broadcast")
+                                    video.start_streaming()
+                                    active_broadcast = True
+                                    
+                            elif data["type"] == "viewer_disconnected":
+                                viewer_count = max(0, viewer_count - 1)
+                                logger.info(f"Viewer disconnected. Total viewers: {viewer_count}")
+                                
+                                # Stop streaming if no more viewers
+                                if viewer_count == 0 and active_broadcast:
+                                    logger.info("No more viewers, pausing broadcast")
+                                    video.stop_streaming()
+                                    active_broadcast = False
+                                    
+                            elif data["type"] == "ice":
+                                # Process ICE candidates from server
+                                try:
+                                    # Create proper RTCIceCandidate object
+                                    candidate = RTCIceCandidate(
+                                        sdpMid=data.get("sdpMid", ""),
+                                        sdpMLineIndex=data.get("sdpMLineIndex", 0)
+                                    )
+                                    # Set the candidate string as an attribute
+                                    candidate.candidate = data["candidate"]
+                                    await pc.addIceCandidate(candidate)
+                                except Exception as e:
+                                    logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
+                                
+                            elif data["type"] == "heartbeat":
+                                # Respond to server heartbeat
+                                await websocket.send(json.dumps({
+                                    "type": "heartbeat_ack"
+                                }))
+                                
+                        except asyncio.TimeoutError:
+                            # No message received, just send a ping to keep the connection alive
+                            try:
+                                # Check if connection is still alive with a ping
+                                # This will raise an exception if the connection is closed
+                                pong_waiter = await websocket.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=2.0)
+                                logger.debug("Ping successful, connection is alive")
+                            except Exception as e:
+                                # If ping fails, the connection is likely dead
+                                logger.warning(f"Ping failed, connection may be dead: {e}")
+                                break
+                
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("WebSocket connection closed")
+                finally:
+                    # Clean up the peer connection (but not the video track - we'll reuse it)
+                    if pc:
+                        await pc.close()
+                    
+                    # Make sure streaming is paused if the connection is lost
+                    if active_broadcast:
+                        logger.info("Connection lost, pausing broadcast")
+                        video.stop_streaming()
+                        active_broadcast = False
+            
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.WebSocketException) as e:
+            logger.warning(f"WebSocket error: {e}, attempting to reconnect in {backoff_time} seconds...")
+            await asyncio.sleep(backoff_time)
+            # Implement exponential backoff with a maximum
+            backoff_time = min(backoff_time * 1.5, max_backoff)
+            
         except Exception as e:
-            logger.error(f"Error in broadcaster: {e}", exc_info=True)
-            logger.info("Attempting to reconnect in 10 seconds...")
-            await asyncio.sleep(10)
+            logger.error(f"Unexpected error: {e}", exc_info=True)
+            logger.info(f"Attempting to reconnect in {backoff_time} seconds...")
+            await asyncio.sleep(backoff_time)
+            # Implement exponential backoff with a maximum
+            backoff_time = min(backoff_time * 1.5, max_backoff)
 
 if __name__ == "__main__":
     # Add command line arguments for customization
