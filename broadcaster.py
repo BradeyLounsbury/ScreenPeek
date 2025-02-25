@@ -88,6 +88,9 @@ class ScreenCaptureTrack(VideoStreamTrack):
         self.active = False
     
     async def recv(self):
+        # Get the next timestamp first thing - this should happen each frame
+        pts, time_base = await self.next_timestamp()
+        
         if not self.active:
             # If not actively streaming, return a black frame at very low FPS
             # to keep the connection alive but use minimal resources
@@ -99,7 +102,6 @@ class ScreenCaptureTrack(VideoStreamTrack):
             black_frame = np.zeros((height, width, 3), dtype=np.uint8)
             
             # Convert to VideoFrame
-            pts, time_base = await self.next_timestamp()
             video_frame = av.VideoFrame.from_ndarray(black_frame, format="bgr24")
             video_frame.pts = pts
             video_frame.time_base = time_base
@@ -111,6 +113,7 @@ class ScreenCaptureTrack(VideoStreamTrack):
             self.start_time = asyncio.get_event_loop().time()
             self.started = True
             self.counter = 0
+            logger.info("Screen capture started - beginning active stream")
             
         # Calculate the expected time for this frame
         expected_time = self.start_time + (self.counter * self.frame_time)
@@ -121,21 +124,29 @@ class ScreenCaptureTrack(VideoStreamTrack):
             await asyncio.sleep(expected_time - now)
         
         # Capture the screen
-        img = self.sct.grab(self.monitor)
-        
-        # Convert to numpy array
-        frame = np.array(img)
-        
-        # Convert BGRA to BGR for video encoding
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        
-        # Resize to target resolution if specified
-        if self.resolution:
-            frame = cv2.resize(frame, (self.resolution[0], self.resolution[1]))
-        
-        # Convert numpy array to VideoFrame
-        pts, time_base = await self.next_timestamp()
-        video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
+        try:
+            img = self.sct.grab(self.monitor)
+            
+            # Convert to numpy array
+            frame = np.array(img)
+            
+            # Convert BGRA to BGR for video encoding
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            
+            # Resize to target resolution if specified
+            if self.resolution:
+                frame = cv2.resize(frame, (self.resolution[0], self.resolution[1]))
+            
+            # Convert numpy array to VideoFrame
+            video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
+            
+        except Exception as e:
+            # If screen capture fails, return a black frame
+            logger.error(f"Screen capture error: {e}")
+            width = self.resolution[0] if self.resolution else self.monitor['width']
+            height = self.resolution[1] if self.resolution else self.monitor['height']
+            black_frame = np.zeros((height, width, 3), dtype=np.uint8)
+            video_frame = av.VideoFrame.from_ndarray(black_frame, format="bgr24")
         
         # Set timestamps
         video_frame.pts = pts
@@ -293,6 +304,20 @@ async def run_broadcaster(server_url="wss://localhost:8000/ws", resolution="1080
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
 
+async def run_broadcaster_with_reconnection(server_url, resolution, fps, monitor):
+    """Run the broadcaster with automatic reconnection if the connection is lost."""
+    while True:
+        try:
+            logger.info("Attempting to connect to server...")
+            await run_broadcaster(server_url, resolution, fps, monitor)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("WebSocket connection closed, attempting to reconnect in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"Error in broadcaster: {e}", exc_info=True)
+            logger.info("Attempting to reconnect in 10 seconds...")
+            await asyncio.sleep(10)
+
 if __name__ == "__main__":
     # Add command line arguments for customization
     parser = argparse.ArgumentParser(description="Screen Broadcaster")
@@ -316,7 +341,8 @@ if __name__ == "__main__":
     print("Press Ctrl+C to stop")
     
     try:
-        asyncio.run(run_broadcaster(
+        # Use the new function with reconnection logic
+        asyncio.run(run_broadcaster_with_reconnection(
             server_url=args.url,
             resolution=args.resolution,
             fps=args.fps,
