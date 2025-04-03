@@ -360,14 +360,20 @@
                             clearInterval(statsInterval);
                         }
                         
+                        // Update in the ontrack function where stats are collected
                         statsInterval = setInterval(async () => {
                             try {
                                 const stats = await pc.getStats();
                                 let statsOutput = '';
                                 let bitrate = 0;
                                 let packetsLost = 0;
+                                let packetsReceived = 0;
                                 let framesDecoded = 0;
                                 let framesDropped = 0;
+                                let jitter = 0;
+                                let frameWidth = 0;
+                                let frameHeight = 0;
+                                let framesPerSecond = 0;
                                 
                                 stats.forEach(report => {
                                     if (report.type === 'inbound-rtp' && report.kind === 'video') {
@@ -378,28 +384,58 @@
                                             const bytesReceived = report.bytesReceived - this.lastBytesReceived;
                                             const timeDiff = (report.timestamp - this.lastTimestamp) / 1000; // in seconds
                                             bitrate = Math.floor((bytesReceived * 8) / timeDiff / 1000); // kbps
+                                            lastBitrate = bitrate; // Store for adaptive streaming
                                         }
                                         
                                         this.lastBytesReceived = report.bytesReceived;
                                         this.lastTimestamp = report.timestamp;
                                         
                                         packetsLost = report.packetsLost || 0;
+                                        packetsReceived = report.packetsReceived || 0;
                                         framesDecoded = report.framesDecoded || 0;
                                         framesDropped = report.framesDropped || 0;
+                                        jitter = report.jitter ? (report.jitter * 1000).toFixed(2) : 0;
+                                        frameWidth = report.frameWidth || 0;
+                                        frameHeight = report.frameHeight || 0;
+                                        framesPerSecond = Math.round(report.framesPerSecond || 0);
+                                        
+                                        // Calculate packet loss percentage for adaptive streaming
+                                        if (packetsReceived + packetsLost > 0) {
+                                            lastPacketLoss = (packetsLost / (packetsReceived + packetsLost) * 100);
+                                        }
                                         
                                         statsOutput += `Time: ${now.toLocaleTimeString()}\n`;
-                                        statsOutput += `Resolution: ${report.frameWidth}x${report.frameHeight}\n`;
-                                        statsOutput += `Framerate: ${Math.round(report.framesPerSecond || 0)} FPS\n`;
+                                        statsOutput += `Resolution: ${frameWidth}x${frameHeight}\n`;
+                                        statsOutput += `Framerate: ${framesPerSecond} FPS\n`;
                                         statsOutput += `Bitrate: ${bitrate} kbps\n`;
-                                        statsOutput += `Packets Lost: ${packetsLost} (${(packetsLost / (report.packetsReceived + packetsLost) * 100).toFixed(2)}%)\n`;
-                                        statsOutput += `Jitter: ${report.jitter ? (report.jitter * 1000).toFixed(2) : 0} ms\n`;
+                                        statsOutput += `Packets Lost: ${packetsLost} (${lastPacketLoss.toFixed(2)}%)\n`;
+                                        statsOutput += `Jitter: ${jitter} ms\n`;
                                         
                                         if (framesDecoded > 0) {
                                             statsOutput += `Frames: ${framesDecoded} decoded, ${framesDropped} dropped (${(framesDropped / framesDecoded * 100).toFixed(2)}%)\n`;
                                         }
                                         
-                                        // Update connection info in status bar
-                                        connectionInfo.textContent = `${report.frameWidth}x${report.frameHeight} @ ${Math.round(report.framesPerSecond || 0)} FPS`;
+                                        // Show network quality indicator
+                                        let networkQuality = "Good";
+                                        if (lastPacketLoss > 5 || jitter > 30) {
+                                            networkQuality = "Poor";
+                                        } else if (lastPacketLoss > 1 || jitter > 15) {
+                                            networkQuality = "Fair";
+                                        }
+                                        
+                                        statsOutput += `Network Quality: ${networkQuality}\n`;
+                                        
+                                        // Update connection info in status bar with more detail
+                                        connectionInfo.textContent = `${frameWidth}x${frameHeight} @ ${framesPerSecond} FPS | ${bitrate} kbps | ${networkQuality}`;
+                                        
+                                        // Set status bar style based on connection quality
+                                        if (networkQuality === "Poor") {
+                                            statusBar.style.backgroundColor = "#ffcccc";
+                                        } else if (networkQuality === "Fair") {
+                                            statusBar.style.backgroundColor = "#ffffcc";
+                                        } else {
+                                            statusBar.style.backgroundColor = "#ccffcc";
+                                        }
                                     }
                                 });
                                 
@@ -567,6 +603,10 @@
                     pc = null;
                 }
                 
+                if (adaptiveQualityInterval) {
+                    clearInterval(adaptiveQualityInterval);
+                }
+                
                 // Close WebSocket
                 if (ws) {
                     ws.close();
@@ -592,9 +632,90 @@
             startBtn.addEventListener('click', startConnection);
             stopBtn.addEventListener('click', stopConnection);
             
-            // Update quality on change
+            // Adaptive streaming based on network conditions
+            let adaptiveStreamingEnabled = qualitySelect.value === 'auto';
+            let lastPacketLoss = 0;
+            let lastBitrate = 0;
+            let networkStabilityCounter = 0;
+            const NETWORK_CHECK_INTERVAL = 5; // seconds
+
+            // Function to automatically adjust quality based on network performance
+            function autoAdjustQuality() {
+                if (!adaptiveStreamingEnabled || !pc) return;
+                
+                // Check if we have valid statistics
+                if (lastBitrate === 0) return;
+                
+                // Get current resolution from quality selector
+                let currentQuality = qualitySelect.value;
+                let newQuality = currentQuality;
+                
+                // Determine if we should change quality
+                // Check packet loss percentage - over 5% is concerning
+                if (lastPacketLoss > 5) {
+                    networkStabilityCounter -= 2;
+                    console.log(`High packet loss detected (${lastPacketLoss.toFixed(2)}%), considering lowering quality`);
+                } else if (lastPacketLoss < 1) {
+                    // Low packet loss, network may be stable
+                    networkStabilityCounter += 1;
+                    console.log(`Low packet loss (${lastPacketLoss.toFixed(2)}%), network may support higher quality`);
+                }
+                
+                // If bitrate is too low for current resolution, consider dropping
+                const minBitrateMap = {
+                    'high': 3000,   // Need at least 3 Mbps for 1080p
+                    'medium': 1500, // Need at least 1.5 Mbps for 720p
+                    'low': 500      // Need at least 500 Kbps for 480p
+                };
+                
+                if (currentQuality !== 'low' && lastBitrate < minBitrateMap[currentQuality]) {
+                    networkStabilityCounter -= 1;
+                    console.log(`Bitrate (${lastBitrate} kbps) may be too low for ${currentQuality} quality`);
+                }
+                
+                // Make quality change decision based on stability counter
+                if (networkStabilityCounter <= -3) {
+                    // Network is unstable, lower quality
+                    if (currentQuality === 'high') {
+                        newQuality = 'medium';
+                    } else if (currentQuality === 'medium') {
+                        newQuality = 'low';
+                    }
+                    networkStabilityCounter = 0;
+                } else if (networkStabilityCounter >= 5) {
+                    // Network is stable for a while, try increasing quality
+                    if (currentQuality === 'low') {
+                        newQuality = 'medium';
+                    } else if (currentQuality === 'medium') {
+                        newQuality = 'high';
+                    }
+                    networkStabilityCounter = 0;
+                }
+                
+                // Apply the quality change if needed
+                if (newQuality !== currentQuality) {
+                    console.log(`Adaptive streaming: Changing quality from ${currentQuality} to ${newQuality}`);
+                    qualitySelect.value = newQuality;
+                    
+                    // Trigger the change event to apply new quality
+                    const event = new Event('change');
+                    qualitySelect.dispatchEvent(event);
+                }
+            }
+
+            // Setup interval for adaptive quality adjustments
+            const adaptiveQualityInterval = setInterval(() => {
+                adaptiveStreamingEnabled = qualitySelect.value === 'auto';
+                if (adaptiveStreamingEnabled) {
+                    autoAdjustQuality();
+                }
+            }, NETWORK_CHECK_INTERVAL * 1000);
+
+            // Update the quality selector change handler
             qualitySelect.addEventListener('change', () => {
                 const newQuality = qualitySelect.value;
+                adaptiveStreamingEnabled = newQuality === 'auto';
+                
                 if (newQuality !== currentQuality && pc && pc.connectionState === 'connected') {
                     // Reconnect to apply new quality settings
                     currentQuality = newQuality;

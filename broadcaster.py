@@ -10,7 +10,7 @@ import websockets
 import av
 import argparse
 import time
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceCandidate
 from fractions import Fraction
 
 # Configure logging
@@ -74,6 +74,68 @@ class ScreenCaptureTrack(VideoStreamTrack):
         except Exception:
             self.hw_accel = False
             logger.info("Error checking hardware acceleration, using software encoding")
+
+        # Configure codec parameters based on hardware acceleration
+        self.codec_options = {}
+        if self.hw_accel:
+            if 'h264_nvenc' in av.codec.Codec.names():
+                self.codec_name = 'h264_nvenc'
+                self.codec_options = {
+                    'preset': 'p4',  # Lower latency preset
+                    'zerolatency': '1',  # Minimize latency
+                    'tune': 'ull',  # Ultra-low latency tuning
+                    'rc': 'vbr',  # Variable bitrate mode
+                    'profile': 'high',  # High profile for better quality
+                    'spatial-aq': '1',  # Spatial adaptive quantization
+                    'temporal-aq': '1'  # Temporal adaptive quantization
+                }
+            elif 'h264_amf' in av.codec.Codec.names():
+                self.codec_name = 'h264_amf'
+                self.codec_options = {
+                    'usage': 'ultralowlatency',  # Ultra-low latency mode
+                    'quality': 'speed',  # Speed over quality
+                    'profile': 'high',  # High profile for better quality at same bitrate
+                    'rc': 'vbr_latency'  # Variable bitrate with latency constraint
+                }
+            elif 'h264_qsv' in av.codec.Codec.names():
+                self.codec_name = 'h264_qsv'
+                self.codec_options = {
+                    'preset': 'veryfast',  # Fast encoding preset
+                    'profile': 'high',  # High profile
+                    'target_usage': '1',  # Speed priority (1=fastest, 7=quality)
+                    'look_ahead': '0',  # Disable lookahead for lower latency
+                    'low_power': '1'  # Low power mode if supported
+                }
+            else:
+                # Fallback to software with optimized settings
+                self.codec_name = 'libx264'
+                self.codec_options = {
+                    'preset': 'ultrafast',
+                    'tune': 'zerolatency',
+                    'profile': 'baseline'
+                }
+        else:
+            # Software encoding with optimized settings
+            self.codec_name = 'libx264'
+            self.codec_options = {
+                'preset': 'ultrafast',
+                'tune': 'zerolatency',
+                'profile': 'baseline'
+            }
+
+        # Calculate target bitrate based on resolution and fps
+        if self.resolution:
+            width, height = self.resolution
+        else:
+            width, height = self.monitor['width'], self.monitor['height']
+            
+        # Bitrate calculation based on resolution, fps, and content complexity
+        # Base formula: bitrate = pixels × 0.1 × fps ÷ 1000 (kbps)
+        pixels = width * height
+        self.target_bitrate = int(pixels * 0.1 * self.fps / 1000)
+
+        # Cap bitrate within reasonable limits
+        self.target_bitrate = max(1000, min(self.target_bitrate, 15000))  # Between 1Mbps and 15Mbps
     
     def start_streaming(self):
         """Start screen capture."""
@@ -135,7 +197,8 @@ class ScreenCaptureTrack(VideoStreamTrack):
             
             # Resize to target resolution if specified
             if self.resolution:
-                frame = cv2.resize(frame, (self.resolution[0], self.resolution[1]))
+                # Use Lanczos interpolation for high-quality downscaling
+                frame = cv2.resize(frame, (self.resolution[0], self.resolution[1]), interpolation=cv2.INTER_LANCZOS4)
             
             # Convert numpy array to VideoFrame
             video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
@@ -156,6 +219,103 @@ class ScreenCaptureTrack(VideoStreamTrack):
         self.counter += 1
         
         return video_frame
+
+def modify_sdp_for_bitrate(sdp, bitrate):
+    """
+    Modify the SDP to include bitrate information for different browsers.
+    
+    Args:
+        sdp (str): The original SDP
+        bitrate (int): Target bitrate in kbps
+        
+    Returns:
+        str: Modified SDP
+    """
+    lines = sdp.split("\r\n")
+    video_section = False
+    video_bandwidth_added = False
+    
+    for i, line in enumerate(lines):
+        # Identify the video media section
+        if line.startswith("m=video"):
+            video_section = True
+        
+        # Add bandwidth info after the media or connection line in video section
+        if video_section and (line.startswith("c=") or line.startswith("m=video")):
+            if not video_bandwidth_added:
+                # Add bandwidth info after this line
+                # b=TIAS is Transport Independent Application Specific in bps
+                # Also add b=AS (Application Specific) in kbps for older clients
+                lines.insert(i + 1, f"b=TIAS:{bitrate * 1000}")
+                lines.insert(i + 2, f"b=AS:{bitrate}")
+                video_bandwidth_added = True
+                break
+    
+    # Handle codec-specific parameters
+    for i, line in enumerate(lines):
+        if "a=rtpmap" in line and ("H264" in line or "VP8" in line or "VP9" in line):
+            pt = line.split(" ")[0].split(":")[1]
+            
+            # Look for existing fmtp line for this payload type
+            fmtp_index = None
+            for j, l in enumerate(lines):
+                if f"a=fmtp:{pt}" in l:
+                    fmtp_index = j
+                    break
+            
+            # Add or modify codec parameters
+            if "H264" in line:
+                params = {
+                    "x-google-min-bitrate": str(bitrate // 2),
+                    "x-google-max-bitrate": str(bitrate),
+                    "x-google-start-bitrate": str(bitrate // 1.5),
+                    "max-fr": "30",  # Max framerate
+                    "max-recv-width": "1920",
+                    "max-recv-height": "1080"
+                }
+                
+                if fmtp_index is not None:
+                    # Modify existing fmtp line
+                    orig_params = lines[fmtp_index].split(" ", 1)
+                    if len(orig_params) > 1:
+                        # Parse existing parameters
+                        param_part = orig_params[1]
+                        param_pairs = param_part.split(";")
+                        existing_params = {}
+                        
+                        for pair in param_pairs:
+                            if "=" in pair:
+                                k, v = pair.split("=", 1)
+                                existing_params[k] = v
+                        
+                        # Merge with our new params
+                        existing_params.update(params)
+                        
+                        # Rebuild the fmtp line
+                        new_param_str = ";".join([f"{k}={v}" for k, v in existing_params.items()])
+                        lines[fmtp_index] = f"a=fmtp:{pt} {new_param_str}"
+                    else:
+                        # No parameters yet, add new ones
+                        param_str = ";".join([f"{k}={v}" for k, v in params.items()])
+                        lines[fmtp_index] = f"a=fmtp:{pt} {param_str}"
+                else:
+                    # No fmtp line yet, add a new one
+                    param_str = ";".join([f"{k}={v}" for k, v in params.items()])
+                    lines.insert(i + 1, f"a=fmtp:{pt} {param_str}")
+            
+            elif "VP8" in line or "VP9" in line:
+                # Similar handling for VP8/VP9
+                if fmtp_index is not None:
+                    # Add parameters to existing line
+                    if "max-fr" not in lines[fmtp_index]:
+                        lines[fmtp_index] += f";max-fr=30"
+                    if "x-google-max-bitrate" not in lines[fmtp_index]:
+                        lines[fmtp_index] += f";x-google-max-bitrate={bitrate}"
+                else:
+                    # Add new fmtp line
+                    lines.insert(i + 1, f"a=fmtp:{pt} max-fr=30;x-google-max-bitrate={bitrate}")
+    
+    return "\r\n".join(lines)
 
 async def run_broadcaster_with_reconnection(server_url, resolution, fps, monitor):
     """Run the broadcaster with automatic reconnection if the connection is lost."""
@@ -228,10 +388,13 @@ async def run_broadcaster_with_reconnection(server_url, resolution, fps, monitor
                 # Create offer
                 logger.info("Creating offer")
                 offer = await pc.createOffer()
+
+                # Modify the SDP to include bitrate information
+                offer.sdp = modify_sdp_for_bitrate(offer.sdp, video.target_bitrate)
                 
                 # Set local description
                 await pc.setLocalDescription(offer)
-                logger.info("Local description set")
+                logger.info(f"Local description set with target bitrate of {video.target_bitrate} kbps")
                 
                 # Send offer to server
                 await websocket.send(json.dumps({
